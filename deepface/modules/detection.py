@@ -1,5 +1,5 @@
 # built-in dependencies
-from typing import Any, Dict, List, Tuple, Union, Optional
+from typing import Any, Dict, List, Tuple, Union
 
 # 3rd part dependencies
 import numpy as np
@@ -7,33 +7,25 @@ import cv2
 from PIL import Image
 
 # project dependencies
-from deepface.modules import preprocessing
+from deepface.modules import modeling
 from deepface.models.Detector import DetectedFace, FacialAreaRegion
 from deepface.detectors import DetectorWrapper
-from deepface.commons import package_utils
-from deepface.commons.logger import Logger
+from deepface.commons import image_utils
+from deepface.commons import logger as log
 
-logger = Logger(module="deepface/modules/detection.py")
+logger = log.get_singletonish_logger()
 
 # pylint: disable=no-else-raise
 
 
-tf_major_version = package_utils.get_tf_major_version()
-if tf_major_version == 1:
-    from keras.preprocessing import image
-elif tf_major_version == 2:
-    from tensorflow.keras.preprocessing import image
-
-
 def extract_faces(
     img_path: Union[str, np.ndarray],
-    target_size: Optional[Tuple[int, int]] = (224, 224),
     detector_backend: str = "opencv",
     enforce_detection: bool = True,
     align: bool = True,
     expand_percentage: int = 0,
     grayscale: bool = False,
-    human_readable=False,
+    anti_spoofing: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Extract faces from a given image
@@ -42,11 +34,9 @@ def extract_faces(
         img_path (str or np.ndarray): Path to the first image. Accepts exact image path
             as a string, numpy array (BGR), or base64 encoded images.
 
-        target_size (tuple): final shape of facial image. black pixels will be
-            added to resize the image.
-
         detector_backend (string): face detector backend. Options: 'opencv', 'retinaface',
-            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8' (default is opencv)
+            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8', 'centerface' or 'skip'
+            (default is opencv)
 
         enforce_detection (boolean): If no face is detected in an image, raise an exception.
             Default is True. Set to False to avoid the exception for low-resolution images.
@@ -58,13 +48,12 @@ def extract_faces(
         grayscale (boolean): Flag to convert the image to grayscale before
             processing (default is False).
 
-        human_readable (bool): Flag to make the image human readable. 3D RGB for human readable
-            or 4D BGR for ML models (default is False).
+        anti_spoofing (boolean): Flag to enable anti spoofing (default is False).
 
     Returns:
         results (List[Dict[str, Any]]): A list of dictionaries, where each dictionary contains:
 
-        - "face" (np.ndarray): The detected face as a NumPy array.
+        - "face" (np.ndarray): The detected face as a NumPy array in RGB format.
 
         - "facial_area" (Dict[str, Any]): The detected face's regions as a dictionary containing:
             - keys 'x', 'y', 'w', 'h' with int values
@@ -73,12 +62,18 @@ def extract_faces(
                 to the person itself instead of observer.
 
         - "confidence" (float): The confidence score associated with the detected face.
+
+        - "is_real" (boolean): antispoofing analyze result. this key is just available in the
+            result only if anti_spoofing is set to True in input arguments.
+
+        - "antispoof_score" (float): score of antispoofing analyze result. this key is
+            just available in the result only if anti_spoofing is set to True in input arguments.
     """
 
     resp_objs = []
 
     # img might be path, base64 or numpy array. Convert it to numpy whatever it is.
-    img, img_name = preprocessing.load_image(img_path)
+    img, img_name = image_utils.load_image(img_path)
 
     if img is None:
         raise ValueError(f"Exception while loading {img_name}")
@@ -122,68 +117,33 @@ def extract_faces(
         if grayscale is True:
             current_img = cv2.cvtColor(current_img, cv2.COLOR_BGR2GRAY)
 
-        # resize and padding
-        if target_size is not None:
-            factor_0 = target_size[0] / current_img.shape[0]
-            factor_1 = target_size[1] / current_img.shape[1]
-            factor = min(factor_0, factor_1)
+        current_img = current_img / 255  # normalize input in [0, 1]
 
-            dsize = (
-                int(current_img.shape[1] * factor),
-                int(current_img.shape[0] * factor),
-            )
-            current_img = cv2.resize(current_img, dsize)
+        x = int(current_region.x)
+        y = int(current_region.y)
+        w = int(current_region.w)
+        h = int(current_region.h)
 
-            diff_0 = target_size[0] - current_img.shape[0]
-            diff_1 = target_size[1] - current_img.shape[1]
-            if grayscale is False:
-                # Put the base image in the middle of the padded image
-                current_img = np.pad(
-                    current_img,
-                    (
-                        (diff_0 // 2, diff_0 - diff_0 // 2),
-                        (diff_1 // 2, diff_1 - diff_1 // 2),
-                        (0, 0),
-                    ),
-                    "constant",
-                )
-            else:
-                current_img = np.pad(
-                    current_img,
-                    (
-                        (diff_0 // 2, diff_0 - diff_0 // 2),
-                        (diff_1 // 2, diff_1 - diff_1 // 2),
-                    ),
-                    "constant",
-                )
+        resp_obj = {
+            "face": current_img[:, :, ::-1],
+            "facial_area": {
+                "x": x,
+                "y": y,
+                "w": w,
+                "h": h,
+                "left_eye": current_region.left_eye,
+                "right_eye": current_region.right_eye,
+            },
+            "confidence": round(current_region.confidence, 2),
+        }
 
-            # double check: if target image is not still the same size with target.
-            if current_img.shape[0:2] != target_size:
-                current_img = cv2.resize(current_img, target_size)
+        if anti_spoofing is True:
+            antispoof_model = modeling.build_model(model_name="Fasnet")
+            is_real, antispoof_score = antispoof_model.analyze(img=img, facial_area=(x, y, w, h))
+            resp_obj["is_real"] = is_real
+            resp_obj["antispoof_score"] = antispoof_score
 
-        # normalizing the image pixels
-        # what this line doing? must?
-        img_pixels = image.img_to_array(current_img)
-        img_pixels = np.expand_dims(img_pixels, axis=0)
-        img_pixels /= 255  # normalize input in [0, 1]
-        # discard expanded dimension
-        if human_readable is True and len(img_pixels.shape) == 4:
-            img_pixels = img_pixels[0]
-
-        resp_objs.append(
-            {
-                "face": img_pixels[:, :, ::-1] if human_readable is True else img_pixels,
-                "facial_area": {
-                    "x": int(current_region.x),
-                    "y": int(current_region.y),
-                    "w": int(current_region.w),
-                    "h": int(current_region.h),
-                    "left_eye": current_region.left_eye,
-                    "right_eye": current_region.right_eye,
-                },
-                "confidence": round(current_region.confidence, 2),
-            }
-        )
+        resp_objs.append(resp_obj)
 
     if len(resp_objs) == 0 and enforce_detection == True:
         raise ValueError(

@@ -1,16 +1,28 @@
+# built-in dependencies
+import base64
+
+# 3rd party dependencies
+import cv2
 import numpy as np
 import pytest
-from deepface import DeepFace
-from deepface.commons.logger import Logger
 
-logger = Logger("tests/test_extract_faces.py")
+# project dependencies
+from deepface import DeepFace
+from deepface.commons import image_utils
+from deepface.commons import logger as log
+
+logger = log.get_singletonish_logger()
 
 detectors = ["opencv", "mtcnn"]
 
 
 def test_different_detectors():
+    img_path = "dataset/img11.jpg"
+    img = cv2.imread(img_path)
+    height, width, _ = img.shape
+
     for detector in detectors:
-        img_objs = DeepFace.extract_faces(img_path="dataset/img11.jpg", detector_backend=detector)
+        img_objs = DeepFace.extract_faces(img_path=img_path, detector_backend=detector)
         for img_obj in img_objs:
             assert "face" in img_obj.keys()
             assert "facial_area" in img_obj.keys()
@@ -26,6 +38,23 @@ def test_different_detectors():
             left_eye = img_obj["facial_area"]["left_eye"]
             assert left_eye[0] > right_eye[0]
             assert "confidence" in img_obj.keys()
+
+            # we added black pixeled borders to image because if faces are close to border,
+            # then alignment moves them to outside of the image. adding this borders may
+            # cause to miscalculate the facial area. check it is restored correctly.
+            x = img_obj["facial_area"]["x"]
+            y = img_obj["facial_area"]["y"]
+            w = img_obj["facial_area"]["w"]
+            h = img_obj["facial_area"]["h"]
+
+            assert x < width
+            assert x + w < width
+            assert y < height
+            assert y + h < height
+            assert left_eye[0] < height
+            assert right_eye[0] < height
+            assert left_eye[1] < width
+            assert right_eye[1] < width
 
             img = img_obj["face"]
             assert img.shape[0] > 0 and img.shape[1] > 0
@@ -48,3 +77,24 @@ def test_backends_for_not_enforced_detection_with_non_facial_inputs():
         )
         assert objs[0]["face"].shape == (224, 224, 3)
     logger.info("✅ extract_faces for not enforced detection and non-facial image test is done")
+
+
+def test_file_types_while_loading_base64():
+    img1_path = "dataset/img47.jpg"
+    img1_base64 = image_to_base64(image_path=img1_path)
+
+    with pytest.raises(ValueError, match="input image can be jpg or png, but it is"):
+        _ = image_utils.load_image_from_base64(uri=img1_base64)
+
+    img2_path = "dataset/img1.jpg"
+    img2_base64 = image_to_base64(image_path=img2_path)
+
+    img2 = image_utils.load_image_from_base64(uri=img2_base64)
+    # 3 dimensional image should be loaded
+    assert len(img2.shape) == 3
+
+
+def image_to_base64(image_path):
+    with open(image_path, "rb") as image_file:
+        encoded_string = base64.b64encode(image_file.read()).decode("utf-8")
+    return "data:image/jpeg," + encoded_string

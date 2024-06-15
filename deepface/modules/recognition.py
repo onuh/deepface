@@ -10,12 +10,11 @@ import pandas as pd
 from tqdm import tqdm
 
 # project dependencies
-from deepface.commons.logger import Logger
-from deepface.commons import package_utils
-from deepface.modules import representation, detection, modeling, verification
-from deepface.models.FacialRecognition import FacialRecognition
+from deepface.commons import image_utils
+from deepface.modules import representation, detection, verification
+from deepface.commons import logger as log
 
-logger = Logger(module="deepface/modules/recognition.py")
+logger = log.get_singletonish_logger()
 
 
 def find(
@@ -30,6 +29,8 @@ def find(
     threshold: Optional[float] = None,
     normalization: str = "base",
     silent: bool = False,
+    refresh_database: bool = True,
+    anti_spoofing: bool = False,
 ) -> List[pd.DataFrame]:
     """
     Identify individuals in a database
@@ -52,7 +53,7 @@ def find(
             Default is True. Set to False to avoid the exception for low-resolution images.
 
         detector_backend (string): face detector backend. Options: 'opencv', 'retinaface',
-            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8'.
+            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8', 'centerface' or 'skip'.
 
         align (boolean): Perform alignment based on the eye positions.
 
@@ -67,6 +68,13 @@ def find(
             Default is base. Options: base, raw, Facenet, Facenet2018, VGGFace, VGGFace2, ArcFace
 
         silent (boolean): Suppress or allow some log messages for a quieter analysis process.
+
+        refresh_database (boolean): Synchronizes the images representation (pkl) file with the
+            directory/db files, if set to false, it will ignore any file changes inside the db_path
+            directory (default is True).
+
+        anti_spoofing (boolean): Flag to enable anti spoofing (default is False).
+
 
     Returns:
         results (List[pd.DataFrame]): A list of pandas dataframes. Each dataframe corresponds
@@ -89,17 +97,25 @@ def find(
 
     tic = time.time()
 
-    # -------------------------------
     if os.path.isdir(db_path) is not True:
         raise ValueError("Passed db_path does not exist!")
 
-    model: FacialRecognition = modeling.build_model(model_name)
-    target_size = model.input_shape
+    file_parts = [
+        "ds",
+        "model",
+        model_name,
+        "detector",
+        detector_backend,
+        "aligned" if align else "unaligned",
+        "normalization",
+        normalization,
+        "expand",
+        str(expand_percentage),
+    ]
 
-    # ---------------------------------------
-
-    file_name = f"ds_{model_name}_{detector_backend}_v2.pkl"
+    file_name = "_".join(file_parts) + ".pkl"
     file_name = file_name.replace("-", "").lower()
+
     datastore_path = os.path.join(db_path, file_name)
     representations = []
 
@@ -136,27 +152,39 @@ def find(
     pickled_images = [representation["identity"] for representation in representations]
 
     # Get the list of images on storage
-    storage_images = __list_images(path=db_path)
+    storage_images = image_utils.list_images(path=db_path)
 
-    if len(storage_images) == 0:
+    if len(storage_images) == 0 and refresh_database is True:
         raise ValueError(f"No item found in {db_path}")
+    if len(representations) == 0 and refresh_database is False:
+        raise ValueError(f"Nothing is found in {datastore_path}")
+
+    must_save_pickle = False
+    new_images = []
+    old_images = []
+    replaced_images = []
+
+    if not refresh_database:
+        logger.info(
+            f"Could be some changes in {db_path} not tracked."
+            "Set refresh_database to true to assure that any changes will be tracked."
+        )
 
     # Enforce data consistency amongst on disk images and pickle file
-    must_save_pickle = False
-    new_images = list(set(storage_images) - set(pickled_images))  # images added to storage
-    old_images = list(set(pickled_images) - set(storage_images))  # images removed from storage
+    if refresh_database:
+        new_images = list(set(storage_images) - set(pickled_images))  # images added to storage
+        old_images = list(set(pickled_images) - set(storage_images))  # images removed from storage
 
-    # detect replaced images
-    replaced_images = []
-    for current_representation in representations:
-        identity = current_representation["identity"]
-        if identity in old_images:
-            continue
-        alpha_hash = current_representation["hash"]
-        beta_hash = package_utils.find_hash_of_file(identity)
-        if alpha_hash != beta_hash:
-            logger.debug(f"Even though {identity} represented before, it's replaced later.")
-            replaced_images.append(identity)
+        # detect replaced images
+        for current_representation in representations:
+            identity = current_representation["identity"]
+            if identity in old_images:
+                continue
+            alpha_hash = current_representation["hash"]
+            beta_hash = image_utils.find_image_hash(identity)
+            if alpha_hash != beta_hash:
+                logger.debug(f"Even though {identity} represented before, it's replaced later.")
+                replaced_images.append(identity)
 
     if not silent and (len(new_images) > 0 or len(old_images) > 0 or len(replaced_images) > 0):
         logger.info(
@@ -179,10 +207,10 @@ def find(
         representations += __find_bulk_embeddings(
             employees=new_images,
             model_name=model_name,
-            target_size=target_size,
             detector_backend=detector_backend,
             enforce_detection=enforce_detection,
             align=align,
+            expand_percentage=expand_percentage,
             normalization=normalization,
             silent=silent,
         )  # add new images
@@ -211,17 +239,19 @@ def find(
     # img path might have more than once face
     source_objs = detection.extract_faces(
         img_path=img_path,
-        target_size=target_size,
         detector_backend=detector_backend,
         grayscale=False,
         enforce_detection=enforce_detection,
         align=align,
         expand_percentage=expand_percentage,
+        anti_spoofing=anti_spoofing,
     )
 
     resp_obj = []
 
     for source_obj in source_objs:
+        if anti_spoofing is True and source_obj.get("is_real", True) is False:
+            raise ValueError("Spoof detected in the given image.")
         source_img = source_obj["face"]
         source_region = source_obj["facial_area"]
         target_embedding_obj = representation.represent(
@@ -285,27 +315,9 @@ def find(
     return resp_obj
 
 
-def __list_images(path: str) -> List[str]:
-    """
-    List images in a given path
-    Args:
-        path (str): path's location
-    Returns:
-        images (list): list of exact image paths
-    """
-    images = []
-    for r, _, f in os.walk(path):
-        for file in f:
-            if file.lower().endswith((".jpg", ".jpeg", ".png")):
-                exact_path = os.path.join(r, file)
-                images.append(exact_path)
-    return images
-
-
 def __find_bulk_embeddings(
     employees: List[str],
     model_name: str = "VGG-Face",
-    target_size: tuple = (224, 224),
     detector_backend: str = "opencv",
     enforce_detection: bool = True,
     align: bool = True,
@@ -321,8 +333,6 @@ def __find_bulk_embeddings(
 
         model_name (str): Model for face recognition. Options: VGG-Face, Facenet, Facenet512,
             OpenFace, DeepFace, DeepID, Dlib, ArcFace, SFace and GhostFaceNet (default is VGG-Face).
-
-        target_size (tuple): expected input shape of facial recognition model
 
         detector_backend (str): face detector model name
 
@@ -348,12 +358,11 @@ def __find_bulk_embeddings(
         desc="Finding representations",
         disable=silent,
     ):
-        file_hash = package_utils.find_hash_of_file(employee)
+        file_hash = image_utils.find_image_hash(employee)
 
         try:
             img_objs = detection.extract_faces(
                 img_path=employee,
-                target_size=target_size,
                 detector_backend=detector_backend,
                 grayscale=False,
                 enforce_detection=enforce_detection,

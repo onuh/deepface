@@ -2,7 +2,7 @@
 import os
 import warnings
 import logging
-from typing import Any, Dict, List, Tuple, Union, Optional
+from typing import Any, Dict, List, Union, Optional
 
 # this has to be set before importing tensorflow
 os.environ["TF_USE_LEGACY_KERAS"] = "1"
@@ -16,7 +16,7 @@ import tensorflow as tf
 
 # package dependencies
 from deepface.commons import package_utils, folder_utils
-from deepface.commons.logger import Logger
+from deepface.commons import logger as log
 from deepface.modules import (
     modeling,
     representation,
@@ -25,10 +25,11 @@ from deepface.modules import (
     demography,
     detection,
     streaming,
+    preprocessing,
 )
 from deepface import __version__
 
-logger = Logger(module="DeepFace")
+logger = log.get_singletonish_logger()
 
 # -----------------------------------
 # configurations for dependencies
@@ -71,6 +72,8 @@ def verify(
     expand_percentage: int = 0,
     normalization: str = "base",
     silent: bool = False,
+    threshold: Optional[float] = None,
+    anti_spoofing: bool = False,
 ) -> Dict[str, Any]:
     """
     Verify if an image pair represents the same person or different persons.
@@ -87,7 +90,8 @@ def verify(
             OpenFace, DeepFace, DeepID, Dlib, ArcFace, SFace and GhostFaceNet (default is VGG-Face).
 
         detector_backend (string): face detector backend. Options: 'opencv', 'retinaface',
-            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8' (default is opencv).
+            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8', 'centerface' or 'skip'
+            (default is opencv).
 
         distance_metric (string): Metric for measuring similarity. Options: 'cosine',
             'euclidean', 'euclidean_l2' (default is cosine).
@@ -105,6 +109,13 @@ def verify(
         silent (boolean): Suppress or allow some log messages for a quieter analysis process
             (default is False).
 
+        threshold (float): Specify a threshold to determine whether a pair represents the same
+            person or different individuals. This threshold is used for comparing distances.
+            If left unset, default pre-tuned threshold values will be applied based on the specified
+            model name and distance metric (default is None).
+
+        anti_spoofing (boolean): Flag to enable anti spoofing (default is False).
+
     Returns:
         result (dict): A dictionary containing verification results with following keys.
 
@@ -114,7 +125,7 @@ def verify(
         - 'distance' (float): The distance measure between the face vectors.
             A lower distance indicates higher similarity.
 
-        - 'max_threshold_to_verify' (float): The maximum threshold used for verification.
+        - 'threshold' (float): The maximum threshold used for verification.
             If the distance is below this threshold, the images are considered a match.
 
         - 'model' (str): The chosen face recognition model.
@@ -141,6 +152,8 @@ def verify(
         expand_percentage=expand_percentage,
         normalization=normalization,
         silent=silent,
+        threshold=threshold,
+        anti_spoofing=anti_spoofing,
     )
 
 
@@ -152,6 +165,7 @@ def analyze(
     align: bool = True,
     expand_percentage: int = 0,
     silent: bool = False,
+    anti_spoofing: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Analyze facial attributes such as age, gender, emotion, and race in the provided image.
@@ -167,7 +181,8 @@ def analyze(
             Set to False to avoid the exception for low-resolution images (default is True).
 
         detector_backend (string): face detector backend. Options: 'opencv', 'retinaface',
-            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8' (default is opencv).
+            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8', 'centerface' or 'skip'
+            (default is opencv).
 
         distance_metric (string): Metric for measuring similarity. Options: 'cosine',
             'euclidean', 'euclidean_l2' (default is cosine).
@@ -178,6 +193,8 @@ def analyze(
 
         silent (boolean): Suppress or allow some log messages for a quieter analysis process
             (default is False).
+
+        anti_spoofing (boolean): Flag to enable anti spoofing (default is False).
 
     Returns:
         results (List[Dict[str, Any]]): A list of dictionaries, where each dictionary represents
@@ -235,6 +252,7 @@ def analyze(
         align=align,
         expand_percentage=expand_percentage,
         silent=silent,
+        anti_spoofing=anti_spoofing,
     )
 
 
@@ -250,6 +268,8 @@ def find(
     threshold: Optional[float] = None,
     normalization: str = "base",
     silent: bool = False,
+    refresh_database: bool = True,
+    anti_spoofing: bool = False,
 ) -> List[pd.DataFrame]:
     """
     Identify individuals in a database
@@ -271,7 +291,8 @@ def find(
             Set to False to avoid the exception for low-resolution images (default is True).
 
         detector_backend (string): face detector backend. Options: 'opencv', 'retinaface',
-            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8' (default is opencv).
+            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8', 'centerface' or 'skip'
+            (default is opencv).
 
         align (boolean): Perform alignment based on the eye positions (default is True).
 
@@ -287,6 +308,12 @@ def find(
 
         silent (boolean): Suppress or allow some log messages for a quieter analysis process
             (default is False).
+
+        refresh_database (boolean): Synchronizes the images representation (pkl) file with the
+            directory/db files, if set to false, it will ignore any file changes inside the db_path
+            (default is True).
+
+        anti_spoofing (boolean): Flag to enable anti spoofing (default is False).
 
     Returns:
         results (List[pd.DataFrame]): A list of pandas dataframes. Each dataframe corresponds
@@ -318,6 +345,8 @@ def find(
         threshold=threshold,
         normalization=normalization,
         silent=silent,
+        refresh_database=refresh_database,
+        anti_spoofing=anti_spoofing,
     )
 
 
@@ -329,6 +358,7 @@ def represent(
     align: bool = True,
     expand_percentage: int = 0,
     normalization: str = "base",
+    anti_spoofing: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Represent facial images as multi-dimensional vector embeddings.
@@ -347,7 +377,8 @@ def represent(
             (default is True).
 
         detector_backend (string): face detector backend. Options: 'opencv', 'retinaface',
-            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8' (default is opencv).
+            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8', 'centerface' or 'skip'
+            (default is opencv).
 
         align (boolean): Perform alignment based on the eye positions (default is True).
 
@@ -356,6 +387,8 @@ def represent(
         normalization (string): Normalize the input image before feeding it to the model.
             Default is base. Options: base, raw, Facenet, Facenet2018, VGGFace, VGGFace2, ArcFace
             (default is base).
+
+        anti_spoofing (boolean): Flag to enable anti spoofing (default is False).
 
     Returns:
         results (List[Dict[str, Any]]): A list of dictionaries, each containing the
@@ -381,6 +414,7 @@ def represent(
         align=align,
         expand_percentage=expand_percentage,
         normalization=normalization,
+        anti_spoofing=anti_spoofing,
     )
 
 
@@ -393,6 +427,7 @@ def stream(
     source: Any = 0,
     time_threshold: int = 5,
     frame_threshold: int = 5,
+    anti_spoofing: bool = False,
 ) -> None:
     """
     Run real time face recognition and facial attribute analysis
@@ -405,7 +440,8 @@ def stream(
             OpenFace, DeepFace, DeepID, Dlib, ArcFace, SFace and GhostFaceNet (default is VGG-Face).
 
         detector_backend (string): face detector backend. Options: 'opencv', 'retinaface',
-            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8' (default is opencv).
+            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8', 'centerface' or 'skip'
+            (default is opencv).
 
         distance_metric (string): Metric for measuring similarity. Options: 'cosine',
             'euclidean', 'euclidean_l2' (default is cosine).
@@ -418,6 +454,8 @@ def stream(
         time_threshold (int): The time threshold (in seconds) for face recognition (default is 5).
 
         frame_threshold (int): The frame threshold for face recognition (default is 5).
+
+        anti_spoofing (boolean): Flag to enable anti spoofing (default is False).
     Returns:
         None
     """
@@ -434,17 +472,18 @@ def stream(
         source=source,
         time_threshold=time_threshold,
         frame_threshold=frame_threshold,
+        anti_spoofing=anti_spoofing,
     )
 
 
 def extract_faces(
     img_path: Union[str, np.ndarray],
-    target_size: Optional[Tuple[int, int]] = (224, 224),
     detector_backend: str = "opencv",
     enforce_detection: bool = True,
     align: bool = True,
     expand_percentage: int = 0,
     grayscale: bool = False,
+    anti_spoofing: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Extract faces from a given image
@@ -453,11 +492,9 @@ def extract_faces(
         img_path (str or np.ndarray): Path to the first image. Accepts exact image path
             as a string, numpy array (BGR), or base64 encoded images.
 
-        target_size (tuple): final shape of facial image. black pixels will be
-            added to resize the image (default is (224, 224)).
-
         detector_backend (string): face detector backend. Options: 'opencv', 'retinaface',
-            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8' (default is opencv).
+            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8', 'centerface' or 'skip'
+            (default is opencv).
 
         enforce_detection (boolean): If no face is detected in an image, raise an exception.
             Set to False to avoid the exception for low-resolution images (default is True).
@@ -468,6 +505,8 @@ def extract_faces(
 
         grayscale (boolean): Flag to convert the image to grayscale before
             processing (default is False).
+
+        anti_spoofing (boolean): Flag to enable anti spoofing (default is False).
 
     Returns:
         results (List[Dict[str, Any]]): A list of dictionaries, where each dictionary contains:
@@ -481,17 +520,22 @@ def extract_faces(
                 instead of observer.
 
         - "confidence" (float): The confidence score associated with the detected face.
+
+        - "is_real" (boolean): antispoofing analyze result. this key is just available in the
+            result only if anti_spoofing is set to True in input arguments.
+
+        - "antispoof_score" (float): score of antispoofing analyze result. this key is
+            just available in the result only if anti_spoofing is set to True in input arguments.
     """
 
     return detection.extract_faces(
         img_path=img_path,
-        target_size=target_size,
         detector_backend=detector_backend,
         enforce_detection=enforce_detection,
         align=align,
         expand_percentage=expand_percentage,
         grayscale=grayscale,
-        human_readable=True,
+        anti_spoofing=anti_spoofing,
     )
 
 
@@ -525,7 +569,8 @@ def detectFace(
             added to resize the image (default is (224, 224)).
 
         detector_backend (string): face detector backend. Options: 'opencv', 'retinaface',
-            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8' (default is opencv).
+            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8', 'centerface' or 'skip'
+            (default is opencv).
 
         enforce_detection (boolean): If no face is detected in an image, raise an exception.
             Set to False to avoid the exception for low-resolution images (default is True).
@@ -538,7 +583,6 @@ def detectFace(
     logger.warn("Function detectFace is deprecated. Use extract_faces instead.")
     face_objs = extract_faces(
         img_path=img_path,
-        target_size=target_size,
         detector_backend=detector_backend,
         enforce_detection=enforce_detection,
         align=align,
@@ -547,4 +591,5 @@ def detectFace(
     extracted_face = None
     if len(face_objs) > 0:
         extracted_face = face_objs[0]["face"]
+        extracted_face = preprocessing.resize_image(img=extracted_face, target_size=target_size)
     return extracted_face

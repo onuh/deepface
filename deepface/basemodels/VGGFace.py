@@ -5,9 +5,9 @@ import numpy as np
 from deepface.commons import package_utils, folder_utils
 from deepface.modules import verification
 from deepface.models.FacialRecognition import FacialRecognition
-from deepface.commons.logger import Logger
+from deepface.commons import logger as log
 
-logger = Logger(module="basemodels.VGGFace")
+logger = log.get_singletonish_logger()
 
 # ---------------------------------------
 
@@ -47,9 +47,12 @@ class VggFaceClient(FacialRecognition):
         self.input_shape = (224, 224)
         self.output_shape = 4096
 
-    def find_embeddings(self, img: np.ndarray) -> List[float]:
+    def forward(self, img: np.ndarray) -> List[float]:
         """
-        find embeddings with VGG-Face model
+        Generates embeddings using the VGG-Face model.
+            This method incorporates an additional normalization layer,
+            necessitating the override of the forward method.
+
         Args:
             img (np.ndarray): pre-loaded image in BGR
         Returns
@@ -57,6 +60,7 @@ class VggFaceClient(FacialRecognition):
         """
         # model.predict causes memory issue when it is called in a for loop
         # embedding = model.predict(img, verbose=0)[0].tolist()
+
         # having normalization layer in descriptor troubles for some gpu users (e.g. issue 957, 966)
         # instead we are now calculating it with traditional way not with keras backend
         embedding = self.model(img, training=False).numpy()[0].tolist()

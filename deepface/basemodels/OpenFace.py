@@ -1,13 +1,11 @@
-from typing import List
 import os
 import gdown
 import tensorflow as tf
-import numpy as np
 from deepface.commons import package_utils, folder_utils
-from deepface.commons.logger import Logger
 from deepface.models.FacialRecognition import FacialRecognition
+from deepface.commons import logger as log
 
-logger = Logger(module="basemodels.OpenFace")
+logger = log.get_singletonish_logger()
 
 tf_version = package_utils.get_tf_major_version()
 if tf_version == 1:
@@ -38,18 +36,6 @@ class OpenFaceClient(FacialRecognition):
         self.model_name = "OpenFace"
         self.input_shape = (96, 96)
         self.output_shape = 128
-
-    def find_embeddings(self, img: np.ndarray) -> List[float]:
-        """
-        find embeddings with OpenFace model
-        Args:
-            img (np.ndarray): pre-loaded image in BGR
-        Returns
-            embeddings (list): multi-dimensional vector
-        """
-        # model.predict causes memory issue when it is called in a for loop
-        # embedding = model.predict(img, verbose=0)[0].tolist()
-        return self.model(img, training=False).numpy()[0].tolist()
 
 
 def load_model(

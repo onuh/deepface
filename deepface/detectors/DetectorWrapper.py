@@ -1,5 +1,6 @@
 from typing import Any, List, Tuple
 import numpy as np
+import cv2
 from deepface.modules import detection
 from deepface.models.Detector import Detector, DetectedFace, FacialAreaRegion
 from deepface.detectors import (
@@ -12,10 +13,11 @@ from deepface.detectors import (
     Ssd,
     Yolo,
     YuNet,
+    CenterFace,
 )
-from deepface.commons.logger import Logger
+from deepface.commons import logger as log
 
-logger = Logger(module="deepface/detectors/DetectorWrapper.py")
+logger = log.get_singletonish_logger()
 
 
 def build_model(detector_backend: str) -> Any:
@@ -38,6 +40,7 @@ def build_model(detector_backend: str) -> Any:
         "yolov8": Yolo.YoloClient,
         "yunet": YuNet.YuNetClient,
         "fastmtcnn": FastMtCnn.FastMtCnnClient,
+        "centerface": CenterFace.CenterFaceClient,
     }
 
     if not "face_detector_obj" in globals():
@@ -82,6 +85,8 @@ def detect_faces(
 
         - confidence (float): The confidence score associated with the detected face.
     """
+    height, width, _ = img.shape
+
     face_detector: Detector = build_model(detector_backend)
 
     # validate expand percentage score
@@ -92,8 +97,23 @@ def detect_faces(
         )
         expand_percentage = 0
 
+    # If faces are close to the upper boundary, alignment move them outside
+    # Add a black border around an image to avoid this.
+    height_border = int(0.5 * height)
+    width_border = int(0.5 * width)
+    if align is True:
+        img = cv2.copyMakeBorder(
+            img,
+            height_border,
+            height_border,
+            width_border,
+            width_border,
+            cv2.BORDER_CONSTANT,
+            value=[0, 0, 0],  # Color of the border (black)
+        )
+
     # find facial areas of given image
-    facial_areas = face_detector.detect_faces(img=img)
+    facial_areas = face_detector.detect_faces(img)
 
     results = []
     for facial_area in facial_areas:
@@ -124,12 +144,22 @@ def detect_faces(
             aligned_img, angle = detection.align_face(
                 img=img, left_eye=left_eye, right_eye=right_eye
             )
+
             rotated_x1, rotated_y1, rotated_x2, rotated_y2 = rotate_facial_area(
                 facial_area=(x, y, x + w, y + h), angle=angle, size=(img.shape[0], img.shape[1])
             )
             detected_face = aligned_img[
                 int(rotated_y1) : int(rotated_y2), int(rotated_x1) : int(rotated_x2)
             ]
+
+            # restore x, y, le and re before border added
+            x = x - width_border
+            y = y - height_border
+            # w and h will not change
+            if left_eye is not None:
+                left_eye = (left_eye[0] - width_border, left_eye[1] - height_border)
+            if right_eye is not None:
+                right_eye = (right_eye[0] - width_border, right_eye[1] - height_border)
 
         result = DetectedFace(
             img=detected_face,
@@ -173,22 +203,30 @@ def rotate_facial_area(
     # Angle in radians
     angle = angle * np.pi / 180
 
+    height, weight = size
+
     # Translate the facial area to the center of the image
-    x = (facial_area[0] + facial_area[2]) / 2 - size[1] / 2
-    y = (facial_area[1] + facial_area[3]) / 2 - size[0] / 2
+    x = (facial_area[0] + facial_area[2]) / 2 - weight / 2
+    y = (facial_area[1] + facial_area[3]) / 2 - height / 2
 
     # Rotate the facial area
     x_new = x * np.cos(angle) + y * direction * np.sin(angle)
     y_new = -x * direction * np.sin(angle) + y * np.cos(angle)
 
     # Translate the facial area back to the original position
-    x_new = x_new + size[1] / 2
-    y_new = y_new + size[0] / 2
+    x_new = x_new + weight / 2
+    y_new = y_new + height / 2
 
-    # Calculate the new facial area
+    # Calculate projected coordinates after alignment
     x1 = x_new - (facial_area[2] - facial_area[0]) / 2
     y1 = y_new - (facial_area[3] - facial_area[1]) / 2
     x2 = x_new + (facial_area[2] - facial_area[0]) / 2
     y2 = y_new + (facial_area[3] - facial_area[1]) / 2
 
-    return (int(x1), int(y1), int(x2), int(y2))
+    # validate projected coordinates are in image's boundaries
+    x1 = max(int(x1), 0)
+    y1 = max(int(y1), 0)
+    x2 = min(int(x2), weight)
+    y2 = min(int(y2), height)
+
+    return (x1, y1, x2, y2)
