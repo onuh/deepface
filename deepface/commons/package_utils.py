@@ -1,5 +1,4 @@
 # built-in dependencies
-import os
 import hashlib
 
 # 3rd party dependencies
@@ -8,7 +7,7 @@ import tensorflow as tf
 # package dependencies
 from deepface.commons.logger import Logger
 
-logger = Logger(module="commons.package_utils")
+logger = Logger()
 
 
 def get_tf_major_version() -> int:
@@ -27,29 +26,6 @@ def get_tf_minor_version() -> int:
         minor_version (int)
     """
     return int(tf.__version__.split(".", maxsplit=-1)[1])
-
-
-def find_hash_of_file(file_path: str) -> str:
-    """
-    Find the hash of given image file with its properties
-        finding the hash of image content is costly operation
-    Args:
-        file_path (str): exact image path
-    Returns:
-        hash (str): digest with sha1 algorithm
-    """
-    file_stats = os.stat(file_path)
-
-    # some properties
-    file_size = file_stats.st_size
-    creation_time = file_stats.st_ctime
-    modification_time = file_stats.st_mtime
-
-    properties = f"{file_size}-{creation_time}-{modification_time}"
-
-    hasher = hashlib.sha1()
-    hasher.update(properties.encode("utf-8"))
-    return hasher.hexdigest()
 
 
 def validate_for_keras3():
@@ -71,3 +47,19 @@ def validate_for_keras3():
             "tf-keras package. Please run `pip install tf-keras` "
             "or downgrade your tensorflow."
         ) from err
+
+
+def find_file_hash(file_path: str, hash_algorithm: str = "sha256") -> str:
+    """
+    Find the hash of a given file with its content
+    Args:
+        file_path (str): exact path of a given file
+        hash_algorithm (str): hash algorithm
+    Returns:
+        hash (str)
+    """
+    hash_func = hashlib.new(hash_algorithm)
+    with open(file_path, "rb") as f:
+        while chunk := f.read(8192):
+            hash_func.update(chunk)
+    return hash_func.hexdigest()

@@ -1,10 +1,12 @@
+# 3rd party dependencies
 import pytest
 import cv2
+
+# project dependencies
 from deepface import DeepFace
 from deepface.commons.logger import Logger
 
-logger = Logger("tests/test_facial_recognition_models.py")
-
+logger = Logger()
 
 models = ["VGG-Face", "Facenet", "Facenet512", "ArcFace", "GhostFaceNet"]
 metrics = ["cosine", "euclidean", "euclidean_l2"]
@@ -119,6 +121,25 @@ def test_verify_for_precalculated_embeddings():
     assert result["verified"] is True
     assert result["distance"] < result["threshold"]
     assert result["model"] == model_name
+    assert result["facial_areas"]["img1"] is not None
+    assert result["facial_areas"]["img2"] is not None
+
+    assert isinstance(result["facial_areas"]["img1"], dict)
+    assert isinstance(result["facial_areas"]["img2"], dict)
+
+    assert "x" in result["facial_areas"]["img1"].keys()
+    assert "y" in result["facial_areas"]["img1"].keys()
+    assert "w" in result["facial_areas"]["img1"].keys()
+    assert "h" in result["facial_areas"]["img1"].keys()
+    assert "left_eye" in result["facial_areas"]["img1"].keys()
+    assert "right_eye" in result["facial_areas"]["img1"].keys()
+
+    assert "x" in result["facial_areas"]["img2"].keys()
+    assert "y" in result["facial_areas"]["img2"].keys()
+    assert "w" in result["facial_areas"]["img2"].keys()
+    assert "h" in result["facial_areas"]["img2"].keys()
+    assert "left_eye" in result["facial_areas"]["img2"].keys()
+    assert "right_eye" in result["facial_areas"]["img2"].keys()
 
     logger.info("✅ test verify for pre-calculated embeddings done")
 
@@ -132,7 +153,7 @@ def test_verify_with_precalculated_embeddings_for_incorrect_model():
 
     with pytest.raises(
         ValueError,
-        match="embeddings of Facenet should have 128 dimensions, but it has 4096 dimensions input",
+        match="embeddings of Facenet should have 128 dimensions, but 1-th image has 4096 dimensions input",
     ):
         _ = DeepFace.verify(
             img1_path=img1_embedding, img2_path=img2_embedding, model_name="Facenet", silent=True
@@ -151,3 +172,19 @@ def test_verify_for_broken_embeddings():
     ):
         _ = DeepFace.verify(img1_path=img1_embeddings, img2_path=img2_embeddings)
     logger.info("✅ test verify for broken embeddings content is done")
+
+
+def test_verify_for_nested_embeddings():
+    """
+    batch embeddings not supported
+    """
+    img1_embeddings = [[1, 2, 3], [4, 5, 6]]
+    img2_path = "dataset/img1.jpg"
+
+    with pytest.raises(
+        ValueError,
+        match="When passing img1_path as a list, ensure that all its items are of type float",
+    ):
+        _ = DeepFace.verify(img1_path=img1_embeddings, img2_path=img2_path)
+
+    logger.info("✅ test verify for nested embeddings is done")

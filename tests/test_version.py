@@ -1,8 +1,11 @@
+# built-in dependencies
 import json
+
+# project dependencies
 from deepface import DeepFace
 from deepface.commons.logger import Logger
 
-logger = Logger("tests/test_version.py")
+logger = Logger()
 
 
 def test_version():

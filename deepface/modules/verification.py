@@ -1,6 +1,6 @@
 # built-in dependencies
 import time
-from typing import Any, Dict, Union, List, Tuple
+from typing import Any, Dict, Optional, Union, List, Tuple
 
 # 3rd party dependencies
 import numpy as np
@@ -10,7 +10,7 @@ from deepface.modules import representation, detection, modeling
 from deepface.models.FacialRecognition import FacialRecognition
 from deepface.commons.logger import Logger
 
-logger = Logger(module="deepface/modules/verification.py")
+logger = Logger()
 
 
 def verify(
@@ -24,6 +24,8 @@ def verify(
     expand_percentage: int = 0,
     normalization: str = "base",
     silent: bool = False,
+    threshold: Optional[float] = None,
+    anti_spoofing: bool = False,
 ) -> Dict[str, Any]:
     """
     Verify if an image pair represents the same person or different persons.
@@ -45,7 +47,8 @@ def verify(
             OpenFace, DeepFace, DeepID, Dlib, ArcFace, SFace and GhostFaceNet (default is VGG-Face).
 
         detector_backend (string): face detector backend. Options: 'opencv', 'retinaface',
-            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8' (default is opencv)
+            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8', 'yolov11n', 'yolov11s', 'yolov11m',
+            'centerface' or 'skip' (default is opencv)
 
         distance_metric (string): Metric for measuring similarity. Options: 'cosine',
             'euclidean', 'euclidean_l2' (default is cosine).
@@ -63,6 +66,13 @@ def verify(
         silent (boolean): Suppress or allow some log messages for a quieter analysis process
             (default is False).
 
+        threshold (float): Specify a threshold to determine whether a pair represents the same
+            person or different individuals. This threshold is used for comparing distances.
+            If left unset, default pre-tuned threshold values will be applied based on the specified
+            model name and distance metric (default is None).
+
+        anti_spoofing (boolean): Flag to enable anti spoofing (default is False).
+
     Returns:
         result (dict): A dictionary containing verification results.
 
@@ -72,7 +82,7 @@ def verify(
         - 'distance' (float): The distance measure between the face vectors.
             A lower distance indicates higher similarity.
 
-        - 'max_threshold_to_verify' (float): The maximum threshold used for verification.
+        - 'threshold' (float): The maximum threshold used for verification.
             If the distance is below this threshold, the images are considered a match.
 
         - 'model' (str): The chosen face recognition model.
@@ -90,80 +100,10 @@ def verify(
 
     tic = time.time()
 
-    model: FacialRecognition = modeling.build_model(model_name)
+    model: FacialRecognition = modeling.build_model(
+        task="facial_recognition", model_name=model_name
+    )
     dims = model.output_shape
-
-    # extract faces from img1
-    if isinstance(img1_path, list):
-        # given image is already pre-calculated embedding
-        if not all(isinstance(dim, float) for dim in img1_path):
-            raise ValueError(
-                "When passing img1_path as a list, ensure that all its items are of type float."
-            )
-
-        if silent is False:
-            logger.warn(
-                "You passed 1st image as pre-calculated embeddings."
-                f"Please ensure that embeddings have been calculated for the {model_name} model."
-            )
-
-        if len(img1_path) != dims:
-            raise ValueError(
-                f"embeddings of {model_name} should have {dims} dimensions,"
-                f" but it has {len(img1_path)} dimensions input"
-            )
-
-        img1_embeddings = [img1_path]
-        img1_facial_areas = [None]
-    else:
-        try:
-            img1_embeddings, img1_facial_areas = __extract_faces_and_embeddings(
-                img_path=img1_path,
-                model_name=model_name,
-                detector_backend=detector_backend,
-                enforce_detection=enforce_detection,
-                align=align,
-                expand_percentage=expand_percentage,
-                normalization=normalization,
-            )
-        except ValueError as err:
-            raise ValueError("Exception while processing img1_path") from err
-
-    # extract faces from img2
-    if isinstance(img2_path, list):
-        # given image is already pre-calculated embedding
-        if not all(isinstance(dim, float) for dim in img2_path):
-            raise ValueError(
-                "When passing img2_path as a list, ensure that all its items are of type float."
-            )
-
-        if silent is False:
-            logger.warn(
-                "You passed 2nd image as pre-calculated embeddings."
-                f"Please ensure that embeddings have been calculated for the {model_name} model."
-            )
-
-        if len(img2_path) != dims:
-            raise ValueError(
-                f"embeddings of {model_name} should have {dims} dimensions,"
-                f" but it has {len(img2_path)} dimensions input"
-            )
-
-        img2_embeddings = [img2_path]
-        img2_facial_areas = [None]
-    else:
-        try:
-            img2_embeddings, img2_facial_areas = __extract_faces_and_embeddings(
-                img_path=img2_path,
-                model_name=model_name,
-                detector_backend=detector_backend,
-                enforce_detection=enforce_detection,
-                align=align,
-                expand_percentage=expand_percentage,
-                normalization=normalization,
-            )
-        except ValueError as err:
-            raise ValueError("Exception while processing img2_path") from err
 
     no_facial_area = {
         "x": None,
@@ -174,20 +114,88 @@ def verify(
         "right_eye": None,
     }
 
-    distances = []
-    facial_areas = []
+    def extract_embeddings_and_facial_areas(
+        img_path: Union[str, np.ndarray, List[float]], index: int
+    ) -> Tuple[List[List[float]], List[dict]]:
+        """
+        Extracts facial embeddings and corresponding facial areas from an
+        image or returns pre-calculated embeddings.
+
+        Depending on the type of img_path, the function either extracts
+        facial embeddings from the provided image
+        (via a path or NumPy array) or verifies that the input is a list of
+        pre-calculated embeddings and validates them.
+
+        Args:
+            img_path (Union[str, np.ndarray, List[float]]):
+                - A string representing the file path to an image,
+                - A NumPy array containing the image data,
+                - Or a list of pre-calculated embedding values (of type `float`).
+            index (int): An index value used in error messages and logging
+            to identify the number of the image.
+
+        Returns:
+            Tuple[List[List[float]], List[dict]]:
+                - A list containing lists of facial embeddings for each detected face.
+                - A list of dictionaries where each dictionary contains facial area information.
+        """
+        if isinstance(img_path, list):
+            # given image is already pre-calculated embedding
+            if not all(isinstance(dim, (float, int)) for dim in img_path):
+
+                raise ValueError(
+                    f"When passing img{index}_path as a list,"
+                    " ensure that all its items are of type float."
+                )
+
+            if silent is False:
+                logger.warn(
+                    f"You passed {index}-th image as pre-calculated embeddings."
+                    "Please ensure that embeddings have been calculated"
+                    f" for the {model_name} model."
+                )
+
+            if len(img_path) != dims:
+                raise ValueError(
+                    f"embeddings of {model_name} should have {dims} dimensions,"
+                    f" but {index}-th image has {len(img_path)} dimensions input"
+                )
+
+            img_embeddings = [img_path]
+            img_facial_areas = [no_facial_area]
+        else:
+            try:
+                img_embeddings, img_facial_areas = __extract_faces_and_embeddings(
+                    img_path=img_path,
+                    model_name=model_name,
+                    detector_backend=detector_backend,
+                    enforce_detection=enforce_detection,
+                    align=align,
+                    expand_percentage=expand_percentage,
+                    normalization=normalization,
+                    anti_spoofing=anti_spoofing,
+                )
+            except ValueError as err:
+                raise ValueError(f"Exception while processing img{index}_path") from err
+        return img_embeddings, img_facial_areas
+
+    img1_embeddings, img1_facial_areas = extract_embeddings_and_facial_areas(img1_path, 1)
+    img2_embeddings, img2_facial_areas = extract_embeddings_and_facial_areas(img2_path, 2)
+
+    min_distance, min_idx, min_idy = float("inf"), None, None
     for idx, img1_embedding in enumerate(img1_embeddings):
         for idy, img2_embedding in enumerate(img2_embeddings):
             distance = find_distance(img1_embedding, img2_embedding, distance_metric)
-            distances.append(distance)
-            facial_areas.append(
-                (img1_facial_areas[idx] or no_facial_area, img2_facial_areas[idy] or no_facial_area)
-            )
+            if distance < min_distance:
+                min_distance, min_idx, min_idy = distance, idx, idy
 
     # find the face pair with minimum distance
-    threshold = find_threshold(model_name, distance_metric)
-    distance = float(min(distances))  # best distance
-    facial_areas = facial_areas[np.argmin(distances)]
+    threshold = threshold or find_threshold(model_name, distance_metric)
+    distance = float(min_distance)
+    facial_areas = (
+        no_facial_area if min_idx is None else img1_facial_areas[min_idx],
+        no_facial_area if min_idy is None else img2_facial_areas[min_idy],
+    )
 
     toc = time.time()
 
@@ -213,6 +221,7 @@ def __extract_faces_and_embeddings(
     align: bool = True,
     expand_percentage: int = 0,
     normalization: str = "base",
+    anti_spoofing: bool = False,
 ) -> Tuple[List[List[float]], List[dict]]:
     """
     Extract facial areas and find corresponding embeddings for given image
@@ -223,21 +232,20 @@ def __extract_faces_and_embeddings(
     embeddings = []
     facial_areas = []
 
-    model: FacialRecognition = modeling.build_model(model_name)
-    target_size = model.input_shape
-
     img_objs = detection.extract_faces(
         img_path=img_path,
-        target_size=target_size,
         detector_backend=detector_backend,
         grayscale=False,
         enforce_detection=enforce_detection,
         align=align,
         expand_percentage=expand_percentage,
+        anti_spoofing=anti_spoofing,
     )
 
     # find embeddings for each face
     for img_obj in img_objs:
+        if anti_spoofing is True and img_obj.get("is_real", True) is False:
+            raise ValueError("Spoof detected in given image.")
         img_embedding_obj = representation.represent(
             img_path=img_obj["face"],
             model_name=model_name,
@@ -256,87 +264,132 @@ def __extract_faces_and_embeddings(
 
 def find_cosine_distance(
     source_representation: Union[np.ndarray, list], test_representation: Union[np.ndarray, list]
-) -> np.float64:
+) -> Union[np.float64, np.ndarray]:
     """
-    Find cosine distance between two given vectors
+    Find cosine distance between two given vectors or batches of vectors.
     Args:
-        source_representation (np.ndarray or list): 1st vector
-        test_representation (np.ndarray or list): 2nd vector
+        source_representation (np.ndarray or list): 1st vector or batch of vectors.
+        test_representation (np.ndarray or list): 2nd vector or batch of vectors.
     Returns
-        distance (np.float64): calculated cosine distance
+        np.float64 or np.ndarray: Calculated cosine distance(s).
+        It returns a np.float64 for single embeddings and np.ndarray for batch embeddings.
     """
-    if isinstance(source_representation, list):
-        source_representation = np.array(source_representation)
+    # Convert inputs to numpy arrays if necessary
+    source_representation = np.asarray(source_representation)
+    test_representation = np.asarray(test_representation)
 
-    if isinstance(test_representation, list):
-        test_representation = np.array(test_representation)
-
-    a = np.matmul(np.transpose(source_representation), test_representation)
-    b = np.sum(np.multiply(source_representation, source_representation))
-    c = np.sum(np.multiply(test_representation, test_representation))
-    return 1 - (a / (np.sqrt(b) * np.sqrt(c)))
+    if source_representation.ndim == 1 and test_representation.ndim == 1:
+        # single embedding
+        dot_product = np.dot(source_representation, test_representation)
+        source_norm = np.linalg.norm(source_representation)
+        test_norm = np.linalg.norm(test_representation)
+        distances = 1 - dot_product / (source_norm * test_norm)
+    elif source_representation.ndim == 2 and test_representation.ndim == 2:
+        # list of embeddings (batch)
+        source_normed = l2_normalize(source_representation, axis=1)  # (N, D)
+        test_normed = l2_normalize(test_representation, axis=1)  # (M, D)
+        cosine_similarities = np.dot(test_normed, source_normed.T)  # (M, N)
+        distances = 1 - cosine_similarities
+    else:
+        raise ValueError(
+            f"Embeddings must be 1D or 2D, but received "
+            f"source shape: {source_representation.shape}, test shape: {test_representation.shape}"
+        )
+    return distances
 
 
 def find_euclidean_distance(
     source_representation: Union[np.ndarray, list], test_representation: Union[np.ndarray, list]
-) -> np.float64:
+) -> Union[np.float64, np.ndarray]:
     """
-    Find euclidean distance between two given vectors
+    Find Euclidean distance between two vectors or batches of vectors.
+
     Args:
-        source_representation (np.ndarray or list): 1st vector
-        test_representation (np.ndarray or list): 2nd vector
-    Returns
-        distance (np.float64): calculated euclidean distance
+        source_representation (np.ndarray or list): 1st vector or batch of vectors.
+        test_representation (np.ndarray or list): 2nd vector or batch of vectors.
+
+    Returns:
+        np.float64 or np.ndarray: Euclidean distance(s).
+            Returns a np.float64 for single embeddings and np.ndarray for batch embeddings.
     """
-    if isinstance(source_representation, list):
-        source_representation = np.array(source_representation)
+    # Convert inputs to numpy arrays if necessary
+    source_representation = np.asarray(source_representation)
+    test_representation = np.asarray(test_representation)
 
-    if isinstance(test_representation, list):
-        test_representation = np.array(test_representation)
+    # Single embedding case (1D arrays)
+    if source_representation.ndim == 1 and test_representation.ndim == 1:
+        distances = np.linalg.norm(source_representation - test_representation)
+    # Batch embeddings case (2D arrays)
+    elif source_representation.ndim == 2 and test_representation.ndim == 2:
+        diff = (
+            source_representation[None, :, :] - test_representation[:, None, :]
+        )  # (N, D) - (M, D)  = (M, N, D)
+        distances = np.linalg.norm(diff, axis=2)  # (M, N)
+    else:
+        raise ValueError(
+            f"Embeddings must be 1D or 2D, but received "
+            f"source shape: {source_representation.shape}, test shape: {test_representation.shape}"
+        )
+    return distances
 
-    euclidean_distance = source_representation - test_representation
-    euclidean_distance = np.sum(np.multiply(euclidean_distance, euclidean_distance))
-    euclidean_distance = np.sqrt(euclidean_distance)
-    return euclidean_distance
 
-
-def l2_normalize(x: Union[np.ndarray, list]) -> np.ndarray:
+def l2_normalize(
+    x: Union[np.ndarray, list], axis: Union[int, None] = None, epsilon: float = 1e-10
+) -> np.ndarray:
     """
     Normalize input vector with l2
     Args:
         x (np.ndarray or list): given vector
+        axis (int): axis along which to normalize
     Returns:
-        y (np.ndarray): l2 normalized vector
+        np.ndarray: l2 normalized vector
     """
-    if isinstance(x, list):
-        x = np.array(x)
-    return x / np.sqrt(np.sum(np.multiply(x, x)))
+    # Convert inputs to numpy arrays if necessary
+    x = np.asarray(x)
+    norm = np.linalg.norm(x, axis=axis, keepdims=True)
+    return x / (norm + epsilon)
 
 
 def find_distance(
     alpha_embedding: Union[np.ndarray, list],
     beta_embedding: Union[np.ndarray, list],
     distance_metric: str,
-) -> np.float64:
+) -> Union[np.float64, np.ndarray]:
     """
-    Wrapper to find distance between vectors according to the given distance metric
+    Wrapper to find the distance between vectors based on the specified distance metric.
+
     Args:
-        source_representation (np.ndarray or list): 1st vector
-        test_representation (np.ndarray or list): 2nd vector
-    Returns
-        distance (np.float64): calculated cosine distance
+        alpha_embedding (np.ndarray or list): 1st vector or batch of vectors.
+        beta_embedding (np.ndarray or list): 2nd vector or batch of vectors.
+        distance_metric (str): The type of distance to compute
+            ('cosine', 'euclidean', or 'euclidean_l2').
+
+    Returns:
+        np.float64 or np.ndarray: The calculated distance(s).
     """
+    # Convert inputs to numpy arrays if necessary
+    alpha_embedding = np.asarray(alpha_embedding)
+    beta_embedding = np.asarray(beta_embedding)
+
+    # Ensure that both embeddings are either 1D or 2D
+    if alpha_embedding.ndim != beta_embedding.ndim or alpha_embedding.ndim not in (1, 2):
+        raise ValueError(
+            f"Both embeddings must be either 1D or 2D, but received "
+            f"alpha shape: {alpha_embedding.shape}, beta shape: {beta_embedding.shape}"
+        )
+
     if distance_metric == "cosine":
         distance = find_cosine_distance(alpha_embedding, beta_embedding)
     elif distance_metric == "euclidean":
         distance = find_euclidean_distance(alpha_embedding, beta_embedding)
     elif distance_metric == "euclidean_l2":
-        distance = find_euclidean_distance(
-            l2_normalize(alpha_embedding), l2_normalize(beta_embedding)
-        )
+        axis = None if alpha_embedding.ndim == 1 else 1
+        normalized_alpha = l2_normalize(alpha_embedding, axis=axis)
+        normalized_beta = l2_normalize(beta_embedding, axis=axis)
+        distance = find_euclidean_distance(normalized_alpha, normalized_beta)
     else:
         raise ValueError("Invalid distance_metric passed - ", distance_metric)
-    return distance
+    return np.round(distance, 6)
 
 
 def find_threshold(model_name: str, distance_metric: str) -> float:
@@ -370,6 +423,7 @@ def find_threshold(model_name: str, distance_metric: str) -> float:
         "DeepFace": {"cosine": 0.23, "euclidean": 64, "euclidean_l2": 0.64},
         "DeepID": {"cosine": 0.015, "euclidean": 45, "euclidean_l2": 0.17},
         "GhostFaceNet": {"cosine": 0.65, "euclidean": 35.71, "euclidean_l2": 1.10},
+        "Buffalo_L": {"cosine": 0.65, "euclidean": 11.13, "euclidean_l2": 1.1},
     }
 
     threshold = thresholds.get(model_name, base_threshold).get(distance_metric, 0.4)

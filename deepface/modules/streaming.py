@@ -2,6 +2,7 @@
 import os
 import time
 from typing import List, Tuple, Optional
+import traceback
 
 # 3rd party dependencies
 import numpy as np
@@ -10,10 +11,9 @@ import cv2
 
 # project dependencies
 from deepface import DeepFace
-from deepface.models.FacialRecognition import FacialRecognition
 from deepface.commons.logger import Logger
 
-logger = Logger(module="commons.realtime")
+logger = Logger()
 
 # dependency configuration
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
@@ -23,6 +23,7 @@ IDENTIFIED_IMG_SIZE = 112
 TEXT_COLOR = (255, 255, 255)
 
 
+# pylint: disable=unused-variable
 def analysis(
     db_path: str,
     model_name="VGG-Face",
@@ -32,6 +33,8 @@ def analysis(
     source=0,
     time_threshold=5,
     frame_threshold=5,
+    anti_spoofing: bool = False,
+    output_path: Optional[str] = None,
 ):
     """
     Run real time face recognition and facial attribute analysis
@@ -41,10 +44,11 @@ def analysis(
             in the database will be considered in the decision-making process.
 
         model_name (str): Model for face recognition. Options: VGG-Face, Facenet, Facenet512,
-            OpenFace, DeepFace, DeepID, Dlib, ArcFace, SFace and GhostFaceNet (default is VGG-Face).
+            OpenFace, DeepFace, DeepID, Dlib, ArcFace, SFace and GhostFaceNet (default is VGG-Face)
 
         detector_backend (string): face detector backend. Options: 'opencv', 'retinaface',
-            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8' (default is opencv).
+            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8', 'yolov11n', 'yolov11s', 'yolov11m',
+            'centerface' or 'skip' (default is opencv).
 
         distance_metric (string): Metric for measuring similarity. Options: 'cosine',
             'euclidean', 'euclidean_l2' (default is cosine).
@@ -57,12 +61,17 @@ def analysis(
         time_threshold (int): The time threshold (in seconds) for face recognition (default is 5).
 
         frame_threshold (int): The frame threshold for face recognition (default is 5).
+
+        anti_spoofing (boolean): Flag to enable anti spoofing (default is False).
+
+        output_path (str): Path to save the output video. (default is None
+            If None, no video is saved).
     Returns:
         None
     """
     # initialize models
     build_demography_models(enable_face_analysis=enable_face_analysis)
-    target_size = build_facial_recognition_model(model_name=model_name)
+    build_facial_recognition_model(model_name=model_name)
     # call a dummy find function for db_path once to create embeddings before starting webcam
     _ = search_identity(
         detected_face=np.zeros([224, 224, 3]),
@@ -72,12 +81,31 @@ def analysis(
         model_name=model_name,
     )
 
+    cap = cv2.VideoCapture(source if isinstance(source, str) else int(source))
+    if not cap.isOpened():
+        logger.error(f"Cannot open video source: {source}")
+        return
+
+    # Get video properties
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # Codec for output file
+    # Ensure the output directory exists if output_path is provided
+    if output_path:
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    # Initialize video writer if output_path is provided
+    video_writer = (
+        cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+        if output_path
+        else None
+    )
+
     freezed_img = None
     freeze = False
     num_frames_with_faces = 0
     tic = time.time()
 
-    cap = cv2.VideoCapture(source)  # webcam
     while True:
         has_frame, img = cap.read()
         if not has_frame:
@@ -86,17 +114,16 @@ def analysis(
         # we are adding some figures into img such as identified facial image, age, gender
         # that is why, we need raw image itself to make analysis
         raw_img = img.copy()
-
         faces_coordinates = []
-        if freeze is False:
+
+        if not freeze:
             faces_coordinates = grab_facial_areas(
-                img=img, detector_backend=detector_backend, target_size=target_size
+                img=img, detector_backend=detector_backend, anti_spoofing=anti_spoofing
             )
 
             # we will pass img to analyze modules (identity, demography) and add some illustrations
             # that is why, we will not be able to extract detected face from img clearly
             detected_faces = extract_facial_areas(img=img, faces_coordinates=faces_coordinates)
-
             img = highlight_facial_areas(img=img, faces_coordinates=faces_coordinates)
             img = countdown_to_freeze(
                 img=img,
@@ -106,11 +133,13 @@ def analysis(
             )
 
             num_frames_with_faces = num_frames_with_faces + 1 if len(faces_coordinates) else 0
-
             freeze = num_frames_with_faces > 0 and num_frames_with_faces % frame_threshold == 0
+
             if freeze:
                 # add analyze results into img - derive from raw_img
-                img = highlight_facial_areas(img=raw_img, faces_coordinates=faces_coordinates)
+                img = highlight_facial_areas(
+                    img=raw_img, faces_coordinates=faces_coordinates, anti_spoofing=anti_spoofing
+                )
 
                 # age, gender and emotion analysis
                 img = perform_demography_analysis(
@@ -137,26 +166,32 @@ def analysis(
                 tic = time.time()
                 logger.info("freezed")
 
-        elif freeze is True and time.time() - tic > time_threshold:
+        elif freeze and time.time() - tic > time_threshold:
             freeze = False
             freezed_img = None
             # reset counter for freezing
             tic = time.time()
-            logger.info("freeze released")
+            logger.info("Freeze released")
 
         freezed_img = countdown_to_release(img=freezed_img, tic=tic, time_threshold=time_threshold)
+        display_img = img if freezed_img is None else freezed_img
 
-        cv2.imshow("img", img if freezed_img is None else freezed_img)
+        # Save the frame to output video if writer is initialized
+        if video_writer:
+            video_writer.write(display_img)
 
-        if cv2.waitKey(1) & 0xFF == ord("q"):  # press q to quit
+        cv2.imshow("img", display_img)
+        if cv2.waitKey(1) & 0xFF == ord("q"):
             break
 
-    # kill open cv things
+    # Release resources
     cap.release()
+    if video_writer:
+        video_writer.release()
     cv2.destroyAllWindows()
 
 
-def build_facial_recognition_model(model_name: str) -> tuple:
+def build_facial_recognition_model(model_name: str) -> None:
     """
     Build facial recognition model
     Args:
@@ -165,9 +200,8 @@ def build_facial_recognition_model(model_name: str) -> tuple:
     Returns
         input_shape (tuple): input shape of given facial recognitio n model.
     """
-    model: FacialRecognition = DeepFace.build_model(model_name=model_name)
+    _ = DeepFace.build_model(task="facial_recognition", model_name=model_name)
     logger.info(f"{model_name} is built")
-    return model.input_shape
 
 
 def search_identity(
@@ -186,7 +220,8 @@ def search_identity(
         model_name (str): Model for face recognition. Options: VGG-Face, Facenet, Facenet512,
             OpenFace, DeepFace, DeepID, Dlib, ArcFace, SFace and GhostFaceNet (default is VGG-Face).
         detector_backend (string): face detector backend. Options: 'opencv', 'retinaface',
-            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8' (default is opencv).
+            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8', 'yolov11n', 'yolov11s', 'yolov11m',
+            'centerface' or 'skip' (default is opencv).
         distance_metric (string): Metric for measuring similarity. Options: 'cosine',
             'euclidean', 'euclidean_l2' (default is cosine).
     Returns:
@@ -231,7 +266,6 @@ def search_identity(
     # load found identity image - extracted if possible
     target_objs = DeepFace.extract_faces(
         img_path=target_path,
-        target_size=(IDENTIFIED_IMG_SIZE, IDENTIFIED_IMG_SIZE),
         detector_backend=detector_backend,
         enforce_detection=False,
         align=True,
@@ -248,6 +282,9 @@ def search_identity(
     else:
         target_img = cv2.imread(target_path)
 
+    # resize anyway
+    target_img = cv2.resize(target_img, (IDENTIFIED_IMG_SIZE, IDENTIFIED_IMG_SIZE))
+
     return target_path.split("/")[-1], target_img
 
 
@@ -261,34 +298,46 @@ def build_demography_models(enable_face_analysis: bool) -> None:
     """
     if enable_face_analysis is False:
         return
-    DeepFace.build_model(model_name="Age")
+    DeepFace.build_model(task="facial_attribute", model_name="Age")
     logger.info("Age model is just built")
-    DeepFace.build_model(model_name="Gender")
+    DeepFace.build_model(task="facial_attribute", model_name="Gender")
     logger.info("Gender model is just built")
-    DeepFace.build_model(model_name="Emotion")
+    DeepFace.build_model(task="facial_attribute", model_name="Emotion")
     logger.info("Emotion model is just built")
 
 
 def highlight_facial_areas(
-    img: np.ndarray, faces_coordinates: List[Tuple[int, int, int, int]]
+    img: np.ndarray,
+    faces_coordinates: List[Tuple[int, int, int, int, bool, float]],
+    anti_spoofing: bool = False,
 ) -> np.ndarray:
     """
     Highlight detected faces with rectangles in the given image
     Args:
         img (np.ndarray): image itself
         faces_coordinates (list): list of face coordinates as tuple with x, y, w and h
+            also is_real and antispoof_score keys
+        anti_spoofing (boolean): Flag to enable anti spoofing (default is False).
     Returns:
         img (np.ndarray): image with highlighted facial areas
     """
-    for x, y, w, h in faces_coordinates:
+    for x, y, w, h, is_real, antispoof_score in faces_coordinates:
         # highlight facial area with rectangle
-        cv2.rectangle(img, (x, y), (x + w, y + h), (67, 67, 67), 1)
+
+        if anti_spoofing is False:
+            color = (67, 67, 67)
+        else:
+            if is_real is True:
+                color = (0, 255, 0)
+            else:
+                color = (0, 0, 255)
+        cv2.rectangle(img, (x, y), (x + w, y + h), color, 1)
     return img
 
 
 def countdown_to_freeze(
     img: np.ndarray,
-    faces_coordinates: List[Tuple[int, int, int, int]],
+    faces_coordinates: List[Tuple[int, int, int, int, bool, float]],
     frame_threshold: int,
     num_frames_with_faces: int,
 ) -> np.ndarray:
@@ -302,7 +351,7 @@ def countdown_to_freeze(
     Returns:
         img (np.ndarray): image with counter values
     """
-    for x, y, w, h in faces_coordinates:
+    for x, y, w, h, is_real, antispoof_score in faces_coordinates:
         cv2.putText(
             img,
             str(frame_threshold - (num_frames_with_faces % frame_threshold)),
@@ -346,15 +395,15 @@ def countdown_to_release(
 
 
 def grab_facial_areas(
-    img: np.ndarray, detector_backend: str, target_size: Tuple[int, int], threshold: int = 130
-) -> List[Tuple[int, int, int, int]]:
+    img: np.ndarray, detector_backend: str, threshold: int = 130, anti_spoofing: bool = False
+) -> List[Tuple[int, int, int, int, bool, float]]:
     """
     Find facial area coordinates in the given image
     Args:
         img (np.ndarray): image itself
         detector_backend (string): face detector backend. Options: 'opencv', 'retinaface',
-            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8' (default is opencv).
-        target_size (tuple): input shape of the facial recognition model.
+            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8', 'yolov11n', 'yolov11s', 'yolov11m',
+            'centerface' or 'skip' (default is opencv).
         threshold (int): threshold for facial area, discard smaller ones
     Returns
         result (list): list of tuple with x, y, w and h coordinates
@@ -363,9 +412,9 @@ def grab_facial_areas(
         face_objs = DeepFace.extract_faces(
             img_path=img,
             detector_backend=detector_backend,
-            target_size=target_size,
             # you may consider to extract with larger expanding value
             expand_percentage=0,
+            anti_spoofing=anti_spoofing,
         )
         faces = [
             (
@@ -373,6 +422,8 @@ def grab_facial_areas(
                 face_obj["facial_area"]["y"],
                 face_obj["facial_area"]["w"],
                 face_obj["facial_area"]["h"],
+                face_obj.get("is_real", True),
+                face_obj.get("antispoof_score", 0),
             )
             for face_obj in face_objs
             if face_obj["facial_area"]["w"] > threshold
@@ -383,19 +434,19 @@ def grab_facial_areas(
 
 
 def extract_facial_areas(
-    img: np.ndarray, faces_coordinates: List[Tuple[int, int, int, int]]
+    img: np.ndarray, faces_coordinates: List[Tuple[int, int, int, int, bool, float]]
 ) -> List[np.ndarray]:
     """
     Extract facial areas as numpy array from given image
     Args:
         img (np.ndarray): image itself
         faces_coordinates (list): list of facial area coordinates as tuple with
-            x, y, w and h values
+            x, y, w and h values also is_real and antispoof_score keys
     Returns:
         detected_faces (list): list of detected facial area images
     """
     detected_faces = []
-    for x, y, w, h in faces_coordinates:
+    for x, y, w, h, is_real, antispoof_score in faces_coordinates:
         detected_face = img[int(y) : int(y + h), int(x) : int(x + w)]
         detected_faces.append(detected_face)
     return detected_faces
@@ -404,7 +455,7 @@ def extract_facial_areas(
 def perform_facial_recognition(
     img: np.ndarray,
     detected_faces: List[np.ndarray],
-    faces_coordinates: List[Tuple[int, int, int, int]],
+    faces_coordinates: List[Tuple[int, int, int, int, bool, float]],
     db_path: str,
     detector_backend: str,
     distance_metric: str,
@@ -416,11 +467,12 @@ def perform_facial_recognition(
         img (np.ndarray): image itself
         detected_faces (list): list of extracted detected face images as numpy
         faces_coordinates (list): list of facial area coordinates as tuple with
-            x, y, w and h values
+            x, y, w and h values also is_real and antispoof_score keys
         db_path (string): Path to the folder containing image files. All detected faces
             in the database will be considered in the decision-making process.
         detector_backend (string): face detector backend. Options: 'opencv', 'retinaface',
-            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8' (default is opencv).
+            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8', 'yolov11n', 'yolov11s',
+            'yolov11m', 'centerface' or 'skip' (default is opencv).
         distance_metric (string): Metric for measuring similarity. Options: 'cosine',
             'euclidean', 'euclidean_l2' (default is cosine).
         model_name (str): Model for face recognition. Options: VGG-Face, Facenet, Facenet512,
@@ -428,7 +480,7 @@ def perform_facial_recognition(
     Returns:
         img (np.ndarray): image with identified face informations
     """
-    for idx, (x, y, w, h) in enumerate(faces_coordinates):
+    for idx, (x, y, w, h, is_real, antispoof_score) in enumerate(faces_coordinates):
         detected_face = detected_faces[idx]
         target_label, target_img = search_identity(
             detected_face=detected_face,
@@ -456,7 +508,7 @@ def perform_facial_recognition(
 def perform_demography_analysis(
     enable_face_analysis: bool,
     img: np.ndarray,
-    faces_coordinates: List[Tuple[int, int, int, int]],
+    faces_coordinates: List[Tuple[int, int, int, int, bool, float]],
     detected_faces: List[np.ndarray],
 ) -> np.ndarray:
     """
@@ -465,14 +517,14 @@ def perform_demography_analysis(
         enable_face_analysis (bool): Flag to enable face analysis.
         img (np.ndarray): image itself
         faces_coordinates (list): list of face coordinates as tuple with
-            x, y, w and h values
+            x, y, w and h values also is_real and antispoof_score keys
         detected_faces (list): list of extracted detected face images as numpy
     Returns:
         img (np.ndarray): image with analyzed demography information
     """
     if enable_face_analysis is False:
         return img
-    for idx, (x, y, w, h) in enumerate(faces_coordinates):
+    for idx, (x, y, w, h, is_real, antispoof_score) in enumerate(faces_coordinates):
         detected_face = detected_faces[idx]
         demographies = DeepFace.analyze(
             img_path=detected_face,
@@ -748,7 +800,7 @@ def overlay_identified_face(
         else:
             logger.info("cannot put facial recognition info on the image")
     except Exception as err:  # pylint: disable=broad-except
-        logger.error(str(err))
+        logger.error(f"{str(err)} - {traceback.format_exc()}")
     return img
 
 
